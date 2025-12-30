@@ -720,3 +720,10 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+if __name__ == '__main__':
+    # Импортируем сервер только если это основной файл
+    import server
+    server.start_http_in_thread()
+    
+    # Запускаем бота
+    asyncio.run(main())
