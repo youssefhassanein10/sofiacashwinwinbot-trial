@@ -1,440 +1,319 @@
 import asyncio
-import sqlite3
 import logging
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.contrib.middlewares.logging import LoggingMiddleware
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.types import ParseMode
 
 import config
+from database import Database
+from keyboards import *
+from utils import *
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
+# Инициализация
 bot = Bot(token=config.BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
-dp.middleware.setup(LoggingMiddleware())
+db = Database()
 
-# Состояния для FSM
-class UserStates(StatesGroup):
-    waiting_for_deposit_amount = State()
-    waiting_for_withdraw_amount = State()
-    waiting_for_admin_amount = State()
+# Состояния FSM
+class DepositStates(StatesGroup):
+    waiting_amount = State()
+    waiting_payment = State()
 
-# Инициализация базы данных
-def init_db():
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    
-    # Таблица пользователей
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            balance REAL DEFAULT 0,
-            total_deposited REAL DEFAULT 0,
-            total_withdrawn REAL DEFAULT 0,
-            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Таблица транзакций
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            type TEXT,
-            amount REAL,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+class WithdrawStates(StatesGroup):
+    waiting_amount = State()
+    waiting_requisites = State()
 
-init_db()
+class AdminStates(StatesGroup):
+    waiting_broadcast = State()
+    waiting_user_action = State()
 
-# Функции для работы с БД
-def get_user(user_id):
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    user = cursor.fetchone()
-    conn.close()
-    return user
-
-def create_user(user_id, username):
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
-    conn.commit()
-    conn.close()
-
-def update_balance(user_id, amount, operation='deposit'):
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    
-    if operation == 'deposit':
-        cursor.execute("UPDATE users SET balance = balance + ?, total_deposited = total_deposited + ? WHERE user_id = ?", 
-                      (amount, amount, user_id))
-    elif operation == 'withdraw':
-        cursor.execute("UPDATE users SET balance = balance - ?, total_withdrawn = total_withdrawn + ? WHERE user_id = ?", 
-                      (amount, amount, user_id))
-    
-    conn.commit()
-    conn.close()
-
-def add_transaction(user_id, trans_type, amount):
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO transactions (user_id, type, amount) VALUES (?, ?, ?)", 
-                  (user_id, trans_type, amount))
-    conn.commit()
-    conn.close()
-
-# Основные клавиатуры
-def get_main_keyboard():
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(KeyboardButton("💰 Баланс"))
-    keyboard.row(KeyboardButton("📥 Пополнить"), KeyboardButton("📤 Вывести"))
-    keyboard.add(KeyboardButton("📊 Статистика"), KeyboardButton("ℹ️ Помощь"))
-    return keyboard
-
-def get_admin_keyboard():
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(KeyboardButton("📊 Общая статистика"))
-    keyboard.add(KeyboardButton("👥 Все пользователи"))
-    keyboard.add(KeyboardButton("➕ Начислить баланс"))
-    keyboard.add(KeyboardButton("🔙 Главное меню"))
-    return keyboard
-
-# Команда /start
+# ===== ОСНОВНЫЕ КОМАНДЫ =====
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    username = message.from_user.username or f"User_{user_id}"
+    username = message.from_user.username or f"user_{user_id}"
+    first_name = message.from_user.first_name or ""
+    last_name = message.from_user.last_name or ""
     
-    create_user(user_id, username)
+    # Проверяем реферальную ссылку
+    referrer_id = None
+    if len(message.text.split()) > 1:
+        ref_code = message.text.split()[1]
+        if ref_code.startswith('ref'):
+            try:
+                referrer_id = int(ref_code[3:])
+            except:
+                pass
     
-    await message.answer(
-        f"👋 Привет, {message.from_user.first_name}!\n"
-        f"Добро пожаловать в бота для управления балансом!\n\n"
-        f"Используйте кнопки ниже для навигации:",
-        reply_markup=get_main_keyboard()
+    db.create_user(user_id, username, first_name, last_name, referrer_id)
+    
+    # Приветственное сообщение
+    welcome_text = (
+        f"🎉 Добро пожаловать в *{config.BOT_NAME}*!\n\n"
+        f"{config.BOT_DESCRIPTION}\n\n"
+        f"💎 *Наши преимущества:*\n"
+        f"• Мгновенные переводы\n"
+        f"• Низкие комиссии\n"
+        f"• Круглосуточная поддержка\n"
+        f"• Множество способов оплаты\n\n"
+        f"📊 *Быстрый старт:*\n"
+        f"1. Пополните баланс\n"
+        f"2. Выводите средства\n"
+        f"3. Приглашайте друзей\n\n"
+        f"💰 *Ваш реферальный код:* `ref{user_id}`\n"
+        f"🔗 *Ссылка:* https://t.me/{message.bot.username}?start=ref{user_id}"
     )
+    
+    await message.answer(welcome_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_main_menu())
 
-# Команда /admin (только для администратора)
 @dp.message_handler(commands=['admin'])
 async def cmd_admin(message: types.Message):
-    if message.from_user.id == config.ADMIN_ID:
-        await message.answer(
-            "⚙️ Панель администратора",
-            reply_markup=get_admin_keyboard()
-        )
-    else:
-        await message.answer("⛔ У вас нет доступа к этой команде.")
-
-# Кнопка "💰 Баланс"
-@dp.message_handler(lambda message: message.text == "💰 Баланс")
-async def show_balance(message: types.Message):
-    user = get_user(message.from_user.id)
+    if message.from_user.id not in config.ADMIN_IDS:
+        await message.answer("⛔ У вас нет доступа к админ-панели")
+        return
     
-    if user:
-        await message.answer(
-            f"📊 Ваш баланс: {user[2]:.2f} руб.\n"
-            f"Всего пополнено: {user[3]:.2f} руб.\n"
-            f"Всего выведено: {user[4]:.2f} руб."
-        )
-    else:
-        await message.answer("Пользователь не найден. Нажмите /start")
-
-# Кнопка "📥 Пополнить"
-@dp.message_handler(lambda message: message.text == "📥 Пополнить")
-async def start_deposit(message: types.Message):
-    await message.answer(
-        f"💳 Введите сумму для пополнения (минимум {config.MIN_DEPOSIT} руб.):\n"
-        f"Пример: 500 или 1000.50"
+    stats = db.get_bot_stats()
+    
+    stats_text = (
+        f"⚙️ *Панель администратора*\n\n"
+        f"📊 *Статистика:*\n"
+        f"👥 Пользователей: {stats['total_users']}\n"
+        f"🔥 Активных сегодня: {stats['active_today']}\n"
+        f"💰 Общий баланс: {format_balance(stats['total_balance'])}\n"
+        f"📥 Всего пополнений: {format_balance(stats['total_deposits'])}\n"
+        f"📤 Всего выводов: {format_balance(stats['total_withdrawals'])}\n"
+        f"⏳ Ожидают обработки: {stats['pending_transactions']}\n\n"
+        f"⚡ *Быстрые действия:*"
     )
-    await UserStates.waiting_for_deposit_amount.set()
-
-# Обработчик суммы пополнения
-@dp.message_handler(state=UserStates.waiting_for_deposit_amount)
-async def process_deposit(message: types.Message, state: FSMContext):
-    try:
-        amount = float(message.text.replace(',', '.'))
-        
-        if amount < config.MIN_DEPOSIT:
-            await message.answer(f"❌ Минимальная сумма пополнения: {config.MIN_DEPOSIT} руб.")
-            return
-        
-        user_id = message.from_user.id
-        update_balance(user_id, amount, 'deposit')
-        add_transaction(user_id, 'deposit', amount)
-        
-        await message.answer(
-            f"✅ Успешно!\n"
-            f"Сумма {amount:.2f} руб. зачислена на ваш баланс.\n"
-            f"Для вывода доступно {amount:.2f} руб."
-        )
-        
-    except ValueError:
-        await message.answer("❌ Пожалуйста, введите корректную сумму (только цифры)")
     
-    await state.finish()
+    await message.answer(stats_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_menu())
 
-# Кнопка "📤 Вывести"
-@dp.message_handler(lambda message: message.text == "📤 Вывести")
-async def start_withdraw(message: types.Message):
-    user = get_user(message.from_user.id)
+# ===== ОСНОВНОЕ МЕНЮ =====
+@dp.message_handler(lambda message: message.text == "💰 Мой баланс")
+async def show_balance(message: types.Message):
+    user = db.get_user(message.from_user.id)
     
     if not user:
         await message.answer("Пользователь не найден. Нажмите /start")
         return
     
-    if user[2] < config.MIN_WITHDRAW:
-        await message.answer(f"❌ Минимальная сумма для вывода: {config.MIN_WITHDRAW} руб.")
+    balance_text = (
+        f"💼 *Ваш баланс*\n\n"
+        f"💎 Основной: *{format_balance(user[4])}*\n"
+        f"📥 Всего пополнено: {format_balance(user[5])}\n"
+        f"📤 Всего выведено: {format_balance(user[6])}\n\n"
+        f"👥 Рефералов: {user[9]}\n"
+        f"🆔 Ваш код: `ref{user[0]}`"
+    )
+    
+    await message.answer(balance_text, parse_mode=ParseMode.MARKDOWN)
+
+@dp.message_handler(lambda message: message.text == "📥 Пополнить")
+async def start_deposit(message: types.Message):
+    await message.answer(
+        f"💳 *Выберите способ пополнения:*\n\n"
+        f"Минимальная сумма: {format_balance(config.MIN_DEPOSIT)}\n"
+        f"Максимальная сумма: {format_balance(config.MAX_DEPOSIT)}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_payment_methods()
+    )
+
+@dp.message_handler(lambda message: message.text == "📤 Вывести")
+async def start_withdraw(message: types.Message):
+    user = db.get_user(message.from_user.id)
+    
+    if not user:
+        await message.answer("Пользователь не найден")
         return
     
-    await message.answer(
-        f"💸 Введите сумму для вывода (доступно: {user[2]:.2f} руб.):\n"
-        f"Минимум: {config.MIN_WITHDRAW} руб.\n"
-        f"Укажите реквизиты для вывода после суммы через пробел (например: '500 карта 1234')"
-    )
-    await UserStates.waiting_for_withdraw_amount.set()
-
-# Обработчик вывода
-@dp.message_handler(state=UserStates.waiting_for_withdraw_amount)
-async def process_withdraw(message: types.Message, state: FSMContext):
-    try:
-        parts = message.text.split(' ', 1)
-        amount = float(parts[0].replace(',', '.'))
-        details = parts[1] if len(parts) > 1 else "Не указаны"
-        
-        user = get_user(message.from_user.id)
-        
-        if amount < config.MIN_WITHDRAW:
-            await message.answer(f"❌ Минимальная сумма вывода: {config.MIN_WITHDRAW} руб.")
-            return
-        
-        if amount > user[2]:
-            await message.answer(f"❌ Недостаточно средств. Доступно: {user[2]:.2f} руб.")
-            return
-        
-        # Обновляем баланс
-        update_balance(message.from_user.id, amount, 'withdraw')
-        add_transaction(message.from_user.id, 'withdraw', amount)
-        
-        # Уведомляем администратора
-        admin_text = (
-            f"🔄 Новая заявка на вывод:\n"
-            f"Пользователь: @{message.from_user.username or 'без username'}\n"
-            f"ID: {message.from_user.id}\n"
-            f"Сумма: {amount:.2f} руб.\n"
-            f"Реквизиты: {details}\n"
-            f"Баланс после вывода: {user[2] - amount:.2f} руб."
-        )
-        
-        try:
-            await bot.send_message(config.ADMIN_ID, admin_text)
-        except:
-            pass
-        
+    if user[4] < config.MIN_WITHDRAW:
         await message.answer(
-            f"✅ Заявка на вывод {amount:.2f} руб. принята!\n"
-            f"Реквизиты: {details}\n"
-            f"Заявка отправлена администратору. Вы получите уведомление."
+            f"❌ *Недостаточно средств*\n\n"
+            f"Минимальная сумма вывода: {format_balance(config.MIN_WITHDRAW)}\n"
+            f"Ваш баланс: {format_balance(user[4])}",
+            parse_mode=ParseMode.MARKDOWN
         )
-        
-    except ValueError:
-        await message.answer("❌ Пожалуйста, введите корректную сумму (например: '500 карта 1234')")
-    except Exception as e:
-        await message.answer("❌ Произошла ошибка. Попробуйте позже.")
-        logger.error(f"Withdraw error: {e}")
-    
-    await state.finish()
-
-# Кнопка "📊 Статистика"
-@dp.message_handler(lambda message: message.text == "📊 Статистика")
-async def show_stats(message: types.Message):
-    user = get_user(message.from_user.id)
-    
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    
-    # Считаем транзакции пользователя
-    cursor.execute("SELECT COUNT(*) FROM transactions WHERE user_id = ?", (message.from_user.id,))
-    total_transactions = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM transactions WHERE user_id = ? AND type = 'deposit'", (message.from_user.id,))
-    deposits_count = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM transactions WHERE user_id = ? AND type = 'withdraw'", (message.from_user.id,))
-    withdraws_count = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    await message.answer(
-        f"📈 Ваша статистика:\n"
-        f"Баланс: {user[2]:.2f} руб.\n"
-        f"Всего пополнений: {deposits_count}\n"
-        f"Всего выводов: {withdraws_count}\n"
-        f"Всего транзакций: {total_transactions}\n"
-        f"Дата регистрации: {user[5]}"
-    )
-
-# Кнопка "ℹ️ Помощь"
-@dp.message_handler(lambda message: message.text == "ℹ️ Помощь")
-async def show_help(message: types.Message):
-    await message.answer(
-        "❓ Помощь по боту:\n\n"
-        "💰 Баланс - посмотреть текущий баланс\n"
-        "📥 Пополнить - пополнить баланс\n"
-        f"  • Минимум: {config.MIN_DEPOSIT} руб.\n"
-        "📤 Вывести - вывести средства\n"
-        f"  • Минимум: {config.MIN_WITHDRAW} руб.\n"
-        "📊 Статистика - ваша статистика\n\n"
-        "Для связи с администратором используйте команду /support"
-    )
-
-# Команда /support
-@dp.message_handler(commands=['support'])
-async def cmd_support(message: types.Message):
-    await message.answer(
-        "📞 Связь с администратором:\n"
-        f"ID администратора: {config.ADMIN_ID}\n"
-        "Опишите вашу проблему, и администратор свяжется с вами."
-    )
-
-# АДМИН-ФУНКЦИИ
-
-# Кнопка "📊 Общая статистика"
-@dp.message_handler(lambda message: message.text == "📊 Общая статистика")
-async def admin_stats(message: types.Message):
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT SUM(balance) FROM users")
-    total_balance = cursor.fetchone()[0] or 0
-    
-    cursor.execute("SELECT SUM(total_deposited) FROM users")
-    total_deposited = cursor.fetchone()[0] or 0
-    
-    cursor.execute("SELECT SUM(total_withdrawn) FROM users")
-    total_withdrawn = cursor.fetchone()[0] or 0
-    
-    cursor.execute("SELECT COUNT(*) FROM transactions")
-    total_transactions = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    await message.answer(
-        f"📊 Общая статистика бота:\n\n"
-        f"👥 Всего пользователей: {total_users}\n"
-        f"💰 Общий баланс: {total_balance:.2f} руб.\n"
-        f"📥 Всего пополнено: {total_deposited:.2f} руб.\n"
-        f"📤 Всего выведено: {total_withdrawn:.2f} руб.\n"
-        f"🔄 Всего транзакций: {total_transactions}"
-    )
-
-# Кнопка "👥 Все пользователи"
-@dp.message_handler(lambda message: message.text == "👥 Все пользователи")
-async def admin_all_users(message: types.Message):
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    
-    conn = sqlite3.connect(config.DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, balance FROM users ORDER BY balance DESC LIMIT 20")
-    users = cursor.fetchall()
-    conn.close()
-    
-    if not users:
-        await message.answer("📭 Пользователей нет")
-        return
-    
-    response = "👥 Топ-20 пользователей:\n\n"
-    for i, user in enumerate(users, 1):
-        response += f"{i}. @{user[1] or 'без username'} (ID: {user[0]})\n   Баланс: {user[2]:.2f} руб.\n\n"
-    
-    await message.answer(response[:4000])  # Ограничение Telegram
-
-# Кнопка "➕ Начислить баланс"
-@dp.message_handler(lambda message: message.text == "➕ Начислить баланс")
-async def admin_add_balance(message: types.Message):
-    if message.from_user.id != config.ADMIN_ID:
         return
     
     await message.answer(
-        "Введите данные в формате:\n"
-        "ID_пользователя сумма\n\n"
-        "Пример: 123456789 1000"
+        f"💸 *Вывод средств*\n\n"
+        f"💰 Доступно: {format_balance(user[4])}\n"
+        f"📉 Комиссия: {config.WITHDRAW_FEE}%\n"
+        f"🔢 Минимум: {format_balance(config.MIN_WITHDRAW)}\n\n"
+        f"*Выберите способ вывода:*",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_withdraw_methods()
     )
-    await UserStates.waiting_for_admin_amount.set()
 
-# Обработчик начисления баланса
-@dp.message_handler(state=UserStates.waiting_for_admin_amount)
-async def process_admin_add(message: types.Message, state: FSMContext):
-    if message.from_user.id != config.ADMIN_ID:
-        await state.finish()
+@dp.message_handler(lambda message: message.text == "📊 История операций")
+async def show_history(message: types.Message):
+    transactions = db.get_user_transactions(message.from_user.id, limit=5)
+    
+    if not transactions:
+        await message.answer("📭 У вас еще нет операций")
         return
     
-    try:
-        parts = message.text.split()
-        if len(parts) != 2:
-            await message.answer("❌ Неверный формат. Пример: 123456789 1000")
-            return
-        
-        user_id = int(parts[0])
-        amount = float(parts[1])
-        
-        if amount <= 0:
-            await message.answer("❌ Сумма должна быть положительной")
-            return
-        
-        # Начисляем баланс
-        update_balance(user_id, amount, 'deposit')
-        add_transaction(user_id, 'admin_deposit', amount)
-        
-        # Пытаемся уведомить пользователя
-        try:
-            await bot.send_message(
-                user_id,
-                f"🎉 Администратор начислил вам {amount:.2f} руб.\n"
-                f"Текущий баланс обновлен."
-            )
-        except:
-            pass
-        
-        await message.answer(f"✅ Пользователю {user_id} начислено {amount:.2f} руб.")
-        
-    except ValueError:
-        await message.answer("❌ Ошибка в данных. Проверьте ID и сумму")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
+    history_text = "📊 *Последние операции:*\n\n"
     
-    await state.finish()
+    for trans in transactions:
+        history_text += f"{format_transaction(trans)}\n\n"
+    
+    await message.answer(history_text, parse_mode=ParseMode.MARKDOWN)
 
-# Кнопка "🔙 Главное меню"
-@dp.message_handler(lambda message: message.text == "🔙 Главное меню")
+@dp.message_handler(lambda message: message.text == "👤 Мой профиль")
+async def show_profile(message: types.Message):
+    user = db.get_user(message.from_user.id)
+    
+    if not user:
+        await message.answer("Пользователь не найден")
+        return
+    
+    profile_text = (
+        f"👤 *Ваш профиль*\n\n"
+        f"🆔 ID: `{user[0]}`\n"
+        f"👁‍🗨 Username: @{user[1] or 'не установлен'}\n"
+        f"📅 Регистрация: {format_date(user[12])}\n"
+        f"💰 Баланс: {format_balance(user[4])}\n\n"
+        f"📊 *Статистика:*\n"
+        f"📥 Пополнений: {format_balance(user[5])}\n"
+        f"📤 Выводов: {format_balance(user[6])}\n"
+        f"👥 Рефералов: {user[9]}\n\n"
+        f"🔗 *Реферальная ссылка:*\n"
+        f"`https://t.me/{message.bot.username}?start=ref{user[0]}`"
+    )
+    
+    await message.answer(profile_text, parse_mode=ParseMode.MARKDOWN)
+
+@dp.message_handler(lambda message: message.text == "🆘 Поддержка")
+async def show_support(message: types.Message):
+    support_text = (
+        f"🆘 *Служба поддержки*\n\n"
+        f"📞 Техподдержка: {config.SUPPORT_USERNAME}\n"
+        f"📢 Новости: {config.CHANNEL_USERNAME}\n"
+        f"🌐 Сайт: {config.WEBSITE_URL}\n\n"
+        f"⏰ *Режим работы:*\n"
+        f"• Поддержка: 24/7\n"
+        f"• Выводы: 10:00-22:00 МСК\n\n"
+        f"📋 *Правила:*\n"
+        f"1. Минимальный вывод: {format_balance(config.MIN_WITHDRAW)}\n"
+        f"2. Комиссия на вывод: {config.WITHDRAW_FEE}%\n"
+        f"3. Верификация не требуется"
+    )
+    
+    await message.answer(support_text, parse_mode=ParseMode.MARKDOWN)
+
+@dp.message_handler(lambda message: message.text == "📈 Курсы")
+async def show_rates(message: types.Message):
+    rates_text = (
+        f"📈 *Курсы обмена*\n\n"
+        f"💵 *Пополнение:*\n"
+        f"• QIWI: 1₽ = 1₽\n"
+        f"• ЮMoney: 1₽ = 1₽\n"
+        f"• Банк. карта: 1₽ = 1₽\n"
+        f"• USDT: 1$ = ~95₽\n\n"
+        f"💸 *Вывод:*\n"
+        f"• Комиссия: {config.WITHDRAW_FEE}%\n"
+        f"• Минимум: {format_balance(config.MIN_WITHDRAW)}\n"
+        f"• Максимум: {format_balance(config.MAX_WITHDRAW)}\n\n"
+        f"⚡ *Сроки:*\n"
+        f"• Пополнение: мгновенно\n"
+        f"• Вывод: 5-60 минут"
+    )
+    
+    await message.answer(rates_text, parse_mode=ParseMode.MARKDOWN)
+
+@dp.message_handler(lambda message: message.text == "🎁 Реферальная программа")
+async def show_referral(message: types.Message):
+    user = db.get_user(message.from_user.id)
+    
+    referral_text = (
+        f"🎁 *Реферальная программа*\n\n"
+        f"💰 *Зарабатывайте 5%* с каждого пополнения приглашенных друзей!\n\n"
+        f"📊 *Ваша статистика:*\n"
+        f"👥 Рефералов: {user[9]}\n"
+        f"🆔 Ваш код: `ref{user[0]}`\n\n"
+        f"🔗 *Ваша ссылка:*\n"
+        f"`https://t.me/{message.bot.username}?start=ref{user[0]}`\n\n"
+        f"📋 *Как работает:*\n"
+        f"1. Друг переходит по вашей ссылке\n"
+        f"2. Пополняет баланс\n"
+        f"3. Вы получаете 5% от его пополнения\n\n"
+        f"💡 *Совет:* Размещайте ссылку в соцсетях!"
+    )
+    
+    await message.answer(referral_text, parse_mode=ParseMode.MARKDOWN)
+
+@dp.message_handler(lambda message: message.text == "🔙 В главное меню")
 async def back_to_main(message: types.Message):
-    await message.answer("Возвращаемся в главное меню:", reply_markup=get_main_keyboard())
+    await message.answer("Возвращаемся в главное меню:", reply_markup=get_main_menu())
 
-# Запуск бота
-async def main():
-    await dp.start_polling()
+# ===== CALLBACK ОБРАБОТЧИКИ =====
+@dp.callback_query_handler(lambda c: c.data.startswith('deposit_'))
+async def process_deposit_method(callback_query: types.CallbackQuery, state: FSMContext):
+    payment_method = callback_query.data.split('_')[1]
+    
+    await state.update_data(payment_method=payment_method)
+    
+    await bot.edit_message_text(
+        chat_id=callback_query.from_user.id,
+        message_id=callback_query.message.message_id,
+        text=(
+            f"💳 *{config.PAYMENT_SYSTEMS.get(payment_method, payment_method)}*\n\n"
+            f"Введите сумму пополнения:\n"
+            f"• Минимум: {format_balance(config.MIN_DEPOSIT)}\n"
+            f"• Максимум: {format_balance(config.MAX_DEPOSIT)}\n\n"
+            f"Пример: `1000` или `500.50`"
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_deposit_amounts()
+    )
+    
+    await DepositStates.waiting_amount.set()
 
-if __name__ == '__main__':
-    asyncio.run(main())
+@dp.callback_query_handler(lambda c: c.data.startswith('amount_'))
+async def process_deposit_amount(callback_query: types.CallbackQuery, state: FSMContext):
+    amount_type = callback_query.data.split('_')[1]
+    
+    if amount_type == 'custom':
+        await bot.answer_callback_query(callback_query.id, "Введите сумму вручную")
+        return
+    
+    if amount_type == 'cancel':
+        await bot.delete_message(
+            chat_id=callback_query.from_user.id,
+            message_id=callback_query.message.message_id
+        )
+        await state.finish()
+        await callback_query.message.answer("Операция отменена", reply_markup=get_main_menu())
+        return
+    
+    # Стандартные суммы
+    amounts = {
+        '50': 50, '100': 100, '500': 500,
+        '1000': 1000, '5000': 5000
+    }
+    
+    amount = amounts.get(amount_type, 0)
+    
+    user_data = await state.get_data()
+    payment_method = user_data.get('payment_method')
+    
+    # Создаем транзакцию
+    trans_id = db.create_transaction(
+        callback_query.from_user.id,
+        'deposit',
+        amount,
+        payment_method
+    )
+    
+    # Генерируем детали опла
