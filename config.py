@@ -1,7 +1,6 @@
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_БОТА"
+import os
 
-ADMINS = [
-    7940060404
-]
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+ADMINS = [7940060404]
 SUPPORT_ADMIN_ID = 7940060404
