@@ -710,20 +710,30 @@ async def process_transaction_action(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id, f"Статус изменен на: {status_text}")
 
 # ===== ЗАПУСК БОТА =====
-async def main():
-    logger.info("Starting SofiaCash Bot...")
+# ===== ИСПРАВЛЕННЫЙ ЗАПУСК =====
+async def on_startup(dp):
+    """Действия при запуске бота"""
+    logger.info("Бот SofiaCash запущен!")
     
-    try:
-        await dp.start_polling()
-    finally:
-        await bot.close()
+    # Отправляем сообщение админам
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, "✅ SofiaCash Bot запущен и работает!")
+        except:
+            pass
+
+async def on_shutdown(dp):
+    """Действия при остановке бота"""
+    logger.info("Бот SofiaCash останавливается...")
+    await bot.close()
 
 if __name__ == '__main__':
-    asyncio.run(main())
-if __name__ == '__main__':
-    # Импортируем сервер только если это основной файл
-    import server
-    server.start_http_in_thread()
+    from aiogram import executor
     
-    # Запускаем бота
-    asyncio.run(main())
+    # Запускаем бота с обработчиками
+    executor.start_polling(
+        dp, 
+        skip_updates=True,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown
+    )
