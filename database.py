@@ -49,7 +49,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                type TEXT NOT NULL,  # 'deposit' или 'payout'
+                type TEXT NOT NULL,
                 amount REAL NOT NULL,
                 status TEXT NOT NULL,
                 reference_id TEXT,
@@ -59,7 +59,6 @@ class Database:
         
         self.conn.commit()
     
-    # Депозиты
     def add_deposit(self, user_id, username, full_name, amount, payment_method):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -85,11 +84,9 @@ class Database:
         cursor.execute(f'UPDATE deposits SET {set_clause} WHERE id = ?', values)
         self.conn.commit()
     
-    # Пользователи
     def add_or_update_user(self, user_id, username, full_name):
         cursor = self.conn.cursor()
         
-        # Проверяем существование пользователя
         cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
         exists = cursor.fetchone()
         
@@ -125,7 +122,6 @@ class Database:
         ''', (amount, amount, user_id))
         self.conn.commit()
     
-    # Запросы для администратора
     def get_pending_deposits(self):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -157,11 +153,9 @@ class Database:
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
     
-    # Статистика
     def get_stats(self):
         cursor = self.conn.cursor()
         
-        # Общая статистика
         cursor.execute('SELECT COUNT(*) as total_users FROM users')
         total_users = cursor.fetchone()[0]
         
